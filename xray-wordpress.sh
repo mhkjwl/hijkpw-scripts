@@ -55,7 +55,7 @@ checkSystem() {
         PMT="apt"
         CMD_INSTALL="apt install -y"
         CMD_REMOVE="apt remove -y"
-        CMD_UPGRADE="apt update; apt upgrade -y; apt autoremove -y"
+        CMD_UPGRADE="apt update"
         PHP_SERVICE="php7.4-fpm"
     else
         PMT="yum"
