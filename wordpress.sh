@@ -266,7 +266,7 @@ EOF
     sed -i "s/database_name_here/$DBNAME/g" wp-config.php
     sed -i "s/username_here/$DBUSER/g" wp-config.php
     sed -i "s/password_here/$DBPASS/g" wp-config.php
-    sed -i "s/utf8/utf8mb4/g" wp-config.php
+    perl -pi -e "s/utf8/utf8mb4/ if /DB_CHARSET/" wp-config.php
     perl -i -pe'
   BEGIN {
     @chars = ("a" .. "z", "A" .. "Z", 0 .. 9);
