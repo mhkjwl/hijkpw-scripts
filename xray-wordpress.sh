@@ -1,9 +1,13 @@
 #!/bin/bash
 # 融合修复版 Xray + WordPress 一键安装脚本
-# 基于 hijk.art 原脚本修复：
-#   1. 修复 WordPress 字符集 utf8mb4mb4 错误
-#   2. 升级 XTLS 流控为 xtls-rprx-vision 以兼容新版 Xray
-#   3. 合并代理与建站功能
+# 修复内容：
+#  1. 修复获取 IP 变量缺失导致的域名解析检测报错退出
+#  2. 修复 Nginx 1.25.1+ 的 http2 语法兼容问题 (http2 on)
+#  3. 修复 Ubuntu/Debian 系统下 apt-key 废弃导致的拉取 PHP 失败
+#  4. 修复 Acme.sh 申请证书使用固定邮箱容易被拉黑的问题
+#  5. 移除不支持的 Trojan+XTLS 选项 (Trojan 不支持 Vision 流控)
+#  6. 修复 WordPress 字符集 utf8mb4 错误
+#  7. 升级 XTLS 流控为 xtls-rprx-vision 以兼容新版 Xray
 
 RED="\033[31m"
 GREEN="\033[32m"
@@ -23,7 +27,7 @@ res=$(command -v bt)
 VLESS="false"; TROJAN="false"; TLS="false"; WS="false"; XTLS="false"; KCP="false"
 VMESS="true"
 
-# 网站伪装列表（原脚本自带）
+# 网站伪装列表
 SITES=(
 http://www.zhuizishu.com/
 http://xs.56dyc.com/
@@ -85,7 +89,7 @@ archAffix() {
 }
 
 # ------------------------------------------------------------
-# Xray 状态检测（兼容新旧配置）
+# Xray 状态检测
 # ------------------------------------------------------------
 status() {
     [[ ! -f /usr/local/bin/xray ]] && { echo 0; return; }
@@ -107,7 +111,7 @@ statusText() {
 }
 
 # ------------------------------------------------------------
-# Xray 安装核心函数（修复 XTLS 流控）
+# Xray 安装核心函数
 # ------------------------------------------------------------
 getVersion() {
     local CUR_VER=$(/usr/local/bin/xray version 2>/dev/null | head -n1 | awk '{print $2}')
@@ -145,7 +149,7 @@ EOF
     systemctl enable xray
 }
 
-# 以下为各协议配置函数（已修复流控）
+# 以下为各协议配置函数
 trojanConfig() {
     cat > $CONFIG_FILE <<EOF
 {
@@ -170,30 +174,7 @@ trojanConfig() {
 }
 EOF
 }
-trojanXTLSConfig() {   # 修复：xtls -> tls, flow 固定为 xtls-rprx-vision
-    cat > $CONFIG_FILE <<EOF
-{
-  "inbounds": [{
-    "port": $PORT,
-    "protocol": "trojan",
-    "settings": {
-      "clients": [{"password": "$PASSWORD","flow": "xtls-rprx-vision"}],
-      "fallbacks": [{"alpn": "http/1.1","dest": 80},{"alpn": "h2","dest": 81}]
-    },
-    "streamSettings": {
-        "network": "tcp",
-        "security": "tls",
-        "tlsSettings": {
-            "serverName": "$DOMAIN",
-            "alpn": ["http/1.1","h2"],
-            "certificates": [{"certificateFile": "$CERT_FILE","keyFile": "$KEY_FILE"}]
-        }
-    }
-  }],
-  "outbounds": [{"protocol": "freedom"},{"protocol": "blackhole","tag": "blocked"}]
-}
-EOF
-}
+
 vmessConfig() {
     local uuid=$(cat /proc/sys/kernel/random/uuid)
     local alterid=$((RANDOM % 31 + 50))
@@ -226,7 +207,7 @@ vlessTLSConfig() {
 {"inbounds":[{"port":$PORT,"protocol":"vless","settings":{"clients":[{"id":"$uuid","level":0}],"decryption":"none","fallbacks":[{"alpn":"http/1.1","dest":80},{"alpn":"h2","dest":81}]},"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"$DOMAIN","alpn":["http/1.1","h2"],"certificates":[{"certificateFile":"$CERT_FILE","keyFile":"$KEY_FILE"}]}}}],"outbounds":[{"protocol":"freedom"}]}
 EOF
 }
-vlessXTLSConfig() {   # 修复：xtls -> tls, flow 固定为 xtls-rprx-vision
+vlessXTLSConfig() {
     local uuid=$(cat /proc/sys/kernel/random/uuid)
     cat > $CONFIG_FILE <<EOF
 {"inbounds":[{"port":$PORT,"protocol":"vless","settings":{"clients":[{"id":"$uuid","flow":"xtls-rprx-vision","level":0}],"decryption":"none","fallbacks":[{"alpn":"http/1.1","dest":80},{"alpn":"h2","dest":81}]},"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"$DOMAIN","alpn":["http/1.1","h2"],"certificates":[{"certificateFile":"$CERT_FILE","keyFile":"$KEY_FILE"}]}}}],"outbounds":[{"protocol":"freedom"}]}
@@ -246,7 +227,7 @@ EOF
 }
 configXray() {
     if [[ "$TROJAN" == "true" ]]; then
-        [[ "$XTLS" == "true" ]] && trojanXTLSConfig || trojanConfig
+        trojanConfig
         return
     fi
     if [[ "$VLESS" == "false" ]]; then
@@ -291,7 +272,11 @@ getCert() {
     stopNginx; systemctl stop xray 2>/dev/null
     netstat -ntlp | grep -E ':80 |:443 ' && { colorEcho $RED "端口80/443被占用"; exit 1; }
     $CMD_INSTALL socat openssl -y
-    curl -sL https://get.acme.sh | sh -s email=hijk.pw@protonmail.sh
+    
+    # 使用随机邮箱避免被 CA 机构限流
+    local RANDOM_EMAIL="admin${RANDOM}@${DOMAIN}"
+    curl -sL https://get.acme.sh | sh -s email=${RANDOM_EMAIL}
+    
     source ~/.bashrc
     ~/.acme.sh/acme.sh --upgrade --auto-upgrade
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
@@ -303,11 +288,24 @@ getCert() {
         --key-file "$KEY_FILE" --fullchain-file "$CERT_FILE" \
         --reloadcmd "systemctl force-reload nginx"
 }
+
 configNginx() {
     mkdir -p /usr/share/nginx/html
     [[ "$ALLOW_SPIDER" == "n" ]] && echo -e "User-Agent: *\nDisallow: /" > /usr/share/nginx/html/robots.txt
     local action=""
     [[ -n "$PROXY_URL" ]] && action="proxy_ssl_server_name on; proxy_pass $PROXY_URL; sub_filter \"$REMOTE_HOST\" \"$DOMAIN\"; sub_filter_once off;"
+    
+    # Nginx 1.25.1+ HTTP/2 语法兼容性处理
+    local HTTP2_FLAG="http2"
+    local HTTP2_ON=""
+    if command -v nginx &>/dev/null; then
+        local NGINX_VER=$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 | tr -d '.')
+        if [[ -n "$NGINX_VER" && "$NGINX_VER" -ge 125 ]]; then
+            HTTP2_FLAG=""
+            HTTP2_ON="http2 on;"
+        fi
+    fi
+
     if [[ "$TLS" == "true" || "$XTLS" == "true" ]]; then
         mkdir -p "$NGINX_CONF_PATH"
         if [[ "$WS" == "true" ]]; then
@@ -317,8 +315,9 @@ server {
     return 301 https://\$server_name:${PORT}\$request_uri;
 }
 server {
-    listen ${PORT} ssl http2; listen [::]:${PORT} ssl http2;
+    listen ${PORT} ssl $HTTP2_FLAG; listen [::]:${PORT} ssl $HTTP2_FLAG;
     server_name $DOMAIN;
+    $HTTP2_ON
     ssl_certificate $CERT_FILE; ssl_certificate_key $KEY_FILE;
     ssl_protocols TLSv1.2 TLSv1.3;
     root /usr/share/nginx/html;
@@ -333,8 +332,9 @@ EOF
         else
             cat > "${NGINX_CONF_PATH}${DOMAIN}.conf" <<EOF
 server {
-    listen 80; listen [::]:80; listen 81 http2;
+    listen 80; listen [::]:80; listen 81 $HTTP2_FLAG;
     server_name $DOMAIN; root /usr/share/nginx/html;
+    $HTTP2_ON
     location / { $action }
 }
 EOF
@@ -367,15 +367,19 @@ installBBR() {
 }
 
 # ------------------------------------------------------------
-# Xray 安装数据收集（已移除流控选择，固定 vision）
+# 数据收集
 # ------------------------------------------------------------
 getData() {
+    # 增加获取本机公网IP的逻辑，修复原脚本未定义 $IP 变量的致命错误
+    IP=$(curl -s4m8 https://api.ipify.org || curl -s4m8 ip.sb)
+    [[ -z "$IP" ]] && IP=$(curl -sL http://ip-api.com/json/ | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+
     [[ "$TLS" == "true" || "$XTLS" == "true" ]] && {
         colorEcho $YELLOW "前提：域名已解析到本机IP ($IP)"
         read -p "请输入伪装域名: " DOMAIN
         DOMAIN=${DOMAIN,,}
         resolve=$(curl -sL http://ip-api.com/json/${DOMAIN} | grep -o "$IP")
-        [[ -z "$resolve" && ! -f ~/xray.pem ]] && { colorEcho $RED "域名未解析到本机"; exit 1; }
+        [[ -z "$resolve" && ! -f ~/xray.pem ]] && { colorEcho $RED "域名未解析到本机IP($IP)！"; exit 1; }
     }
     if [[ "$(needNginx)" == "no" ]]; then
         read -p "请输入xray端口 [100-65535]: " PORT
@@ -447,7 +451,7 @@ installXrayMain() {
 }
 
 # ------------------------------------------------------------
-# WordPress 相关函数（修复字符集错误）
+# WordPress 相关函数
 # ------------------------------------------------------------
 installPHP() {
     [[ "$PMT" == "apt" ]] && $PMT update
@@ -459,9 +463,10 @@ installPHP() {
         sed -i '0,/enabled=0/{s/enabled=0/enabled=1/}' /etc/yum.repos.d/remi*.repo
         $CMD_INSTALL php-cli php-fpm php-bcmath php-gd php-mbstring php-mysqlnd php-pdo php-xml php-pecl-zip -y
     else
-        $CMD_INSTALL lsb-release gnupg2 -y
-        wget -q https://packages.sury.org/php/apt.gpg -O- | apt-key add -
-        echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php.list
+        $CMD_INSTALL lsb-release gnupg2 curl -y
+        # 修复 Ubuntu/Debian apt-key 废弃问题，使用 gpg 方式挂载密钥
+        curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor --yes -o /usr/share/keyrings/php-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/php-archive-keyring.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php.list
         $PMT update
         $CMD_INSTALL php7.4-cli php7.4-fpm php7.4-bcmath php7.4-gd php7.4-mbstring php7.4-mysql php7.4-xml php7.4-zip -y
         update-alternatives --set php /usr/bin/php7.4
@@ -519,7 +524,6 @@ EOF
     local user="www-data"
     [[ "$PMT" == "yum" ]] && user="apache"
     chown -R "$user":"$user" "/var/www/$DOMAIN"
-    # 配置 nginx 虚拟主机（如果尚未配置）
     if [[ ! -f "${NGINX_CONF_PATH}${DOMAIN}.conf" ]]; then
         local upstream="unix:/run/php/php7.4-fpm.sock"
         [[ "$PMT" == "yum" && $MAIN -eq 7 ]] && upstream="127.0.0.1:9000"
@@ -597,13 +601,13 @@ showXrayInfo() {
 showXrayLog() { journalctl -u xray -n 50 --no-pager; }
 
 # ------------------------------------------------------------
-# 主菜单（融合）
+# 主菜单
 # ------------------------------------------------------------
 menu() {
     clear
     echo "#############################################################"
-    echo -e "#          ${RED}Xray + WordPress 一键安装脚本（修复版）${PLAIN}          #"
-    echo -e "# ${GREEN}作者: 网络跳越 (修复 by AI)${PLAIN}                              #"
+    echo -e "#          ${RED}Xray + WordPress 一键安装脚本（完美修复版）${PLAIN}      #"
+    echo -e "# ${GREEN}作者: 网络跳越 (修复 by AI)${PLAIN}                               #"
     echo "#############################################################"
     echo -e "  ${GREEN}1.${PLAIN}   Xray-VMESS"
     echo -e "  ${GREEN}2.${PLAIN}   Xray-VMESS+mKCP"
@@ -612,27 +616,26 @@ menu() {
     echo -e "  ${GREEN}5.${PLAIN}   Xray-VLESS+mKCP"
     echo -e "  ${GREEN}6.${PLAIN}   Xray-VLESS+TCP+TLS"
     echo -e "  ${GREEN}7.${PLAIN}   Xray-VLESS+WS+TLS ${RED}(可过CDN)${PLAIN}"
-    echo -e "  ${GREEN}8.${PLAIN}   Xray-VLESS+TCP+XTLS ${RED}(推荐，已修复流控)${PLAIN}"
+    echo -e "  ${GREEN}8.${PLAIN}   Xray-VLESS+TCP+XTLS ${RED}(推荐，已修复Vision流控)${PLAIN}"
     echo -e "  ${GREEN}9.${PLAIN}   Trojan ${RED}(推荐)${PLAIN}"
-    echo -e "  ${GREEN}10.${PLAIN}  Trojan+XTLS ${RED}(推荐，已修复流控)${PLAIN}"
     echo " -------------"
-    echo -e "  ${GREEN}11.${PLAIN}  安装 WordPress（需先安装 Xray 并获得域名）"
-    echo -e "  ${GREEN}12.${PLAIN}  卸载 WordPress"
-    echo -e "  ${GREEN}13.${PLAIN}  查看 WordPress 配置"
-    echo -e "  ${GREEN}14.${PLAIN}  查看操作帮助（Nginx/PHP/MySQL）"
+    echo -e "  ${GREEN}10.${PLAIN}  安装 WordPress（需先安装 Xray 并获得域名）"
+    echo -e "  ${GREEN}11.${PLAIN}  卸载 WordPress"
+    echo -e "  ${GREEN}12.${PLAIN}  查看 WordPress 配置"
+    echo -e "  ${GREEN}13.${PLAIN}  查看操作帮助（Nginx/PHP/MySQL）"
     echo " -------------"
-    echo -e "  ${GREEN}15.${PLAIN}  更新 Xray"
-    echo -e "  ${GREEN}16.${PLAIN}  卸载 Xray"
-    echo -e "  ${GREEN}17.${PLAIN}  启动 Xray"
-    echo -e "  ${GREEN}18.${PLAIN}  重启 Xray"
-    echo -e "  ${GREEN}19.${PLAIN}  停止 Xray"
-    echo -e "  ${GREEN}20.${PLAIN}  查看 Xray 配置"
-    echo -e "  ${GREEN}21.${PLAIN}  查看 Xray 日志"
+    echo -e "  ${GREEN}14.${PLAIN}  更新 Xray"
+    echo -e "  ${GREEN}15.${PLAIN}  卸载 Xray"
+    echo -e "  ${GREEN}16.${PLAIN}  启动 Xray"
+    echo -e "  ${GREEN}17.${PLAIN}  重启 Xray"
+    echo -e "  ${GREEN}18.${PLAIN}  停止 Xray"
+    echo -e "  ${GREEN}19.${PLAIN}  查看 Xray 配置"
+    echo -e "  ${GREEN}20.${PLAIN}  查看 Xray 日志"
     echo " -------------"
     echo -e "  ${GREEN}0.${PLAIN}   退出"
     echo -n "当前状态: "; statusText
     echo
-    read -p "请选择操作 [0-21]: " answer
+    read -p "请选择操作 [0-20]: " answer
     case $answer in
         0) exit 0 ;;
         1) installXrayMain ;;
@@ -644,8 +647,7 @@ menu() {
         7) VLESS="true"; TLS="true"; WS="true"; installXrayMain ;;
         8) VLESS="true"; TLS="true"; XTLS="true"; installXrayMain ;;
         9) TROJAN="true"; TLS="true"; installXrayMain ;;
-        10) TROJAN="true"; TLS="true"; XTLS="true"; installXrayMain ;;
-        11)
+        10)
             [[ $(status) -lt 2 ]] && { colorEcho $RED "请先安装 Xray 并获得域名"; exit 1; }
             DOMAIN=$(grep -oE 'serverName": "[^"]+' $CONFIG_FILE | head -n1 | cut -d'"' -f3)
             [[ -z "$DOMAIN" ]] && DOMAIN=$(grep -oE 'Host": "[^"]+' $CONFIG_FILE | head -n1 | cut -d'"' -f3)
@@ -653,20 +655,20 @@ menu() {
             installPHP; installMysql; installWordPress; configWordPress
             colorEcho $GREEN "WordPress 安装完成！"; showWordPressInfo
             ;;
-        12) uninstallWordPress ;;
-        13) showWordPressInfo ;;
-        14)
+        11) uninstallWordPress ;;
+        12) showWordPressInfo ;;
+        13)
             echo "Nginx: systemctl start/stop/restart nginx"
             echo "PHP:   systemctl start/stop/restart $PHP_SERVICE"
             echo "MySQL: systemctl start/stop/restart mariadb"
             ;;
-        15) updateXray ;;
-        16) uninstallXray ;;
-        17) startXray ;;
-        18) restartXray ;;
-        19) stopXray ;;
-        20) showXrayInfo ;;
-        21) showXrayLog ;;
+        14) updateXray ;;
+        15) uninstallXray ;;
+        16) startXray ;;
+        17) restartXray ;;
+        18) stopXray ;;
+        19) showXrayInfo ;;
+        20) showXrayLog ;;
         *) colorEcho $RED "无效选项" ;;
     esac
 }
