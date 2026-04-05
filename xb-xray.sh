@@ -250,34 +250,6 @@ archAffix(){
 	return 0
 }
 
-# 使用本机 DNS 查询域名 A 记录（不依赖 ip-api 等第三方 HTTP 接口，避免其限流/需密钥导致误判）
-getDomainARecords() {
-    local d="$1"
-    local r=""
-    if command -v dig >/dev/null 2>&1; then
-        r+=$(dig +short A "$d" @8.8.8.8 2>/dev/null)$'\n'
-        r+=$(dig +short A "$d" @1.1.1.1 2>/dev/null)$'\n'
-        r+=$(dig +short A "$d" 2>/dev/null)$'\n'
-    fi
-    if command -v host >/dev/null 2>&1; then
-        r+=$(host -t A "$d" 2>/dev/null | awk '/has address/ { print $4 }')$'\n'
-    fi
-    if command -v getent >/dev/null 2>&1; then
-        r+=$(getent ahostsv4 "$d" 2>/dev/null | awk '/^[0-9.]+/ { print $1 }')$'\n'
-    fi
-    echo "$r" | grep -E '^[0-9.]+$' | sort -u
-}
-
-domainPointsToIp() {
-    local want="$2"
-    local a
-    while read -r a; do
-        [[ -z "$a" ]] && continue
-        [[ "$a" == "$want" ]] && return 0
-    done < <(getDomainARecords "$1")
-    return 1
-}
-
 getData() {
     if [[ "$TLS" = "true" || "$XTLS" = "true" ]]; then
         echo ""
@@ -310,13 +282,14 @@ getData() {
             CERT_FILE="/usr/local/etc/xray/${DOMAIN}.pem"
             KEY_FILE="/usr/local/etc/xray/${DOMAIN}.key"
         else
-            if ! domainPointsToIp "$DOMAIN" "$IP"; then
-                _rec=$(getDomainARecords "$DOMAIN" | tr '\n' ' ')
-                colorEcho ${BLUE}  " ${DOMAIN} 当前解析到的 IPv4：${_rec:-（未能解析，请检查 DNS 或安装 dig/bind-utils）}"
-                colorEcho ${RED}  " 域名未解析到当前服务器 IP（${IP}）！若已改解析请等待 TTL，或确认本机与公共 DNS 结果一致。"
+            # 与旧版脚本一致：通过 ip-api 校验（请使用 http 端点；https 免费端点可能要求 API Key）
+            resolve=`curl -sL --connect-timeout 15 "http://ip-api.com/json/${DOMAIN}"`
+            res=`echo -n ${resolve} | grep ${IP}`
+            if [[ -z "${res}" ]]; then
+                colorEcho ${BLUE}  "${DOMAIN} 解析结果：${resolve}"
+                colorEcho ${RED}  " 域名未解析到当前服务器IP(${IP})!"
                 exit 1
             fi
-            colorEcho ${GREEN}  " DNS 校验通过：${DOMAIN} 已指向本机 ${IP}"
         fi
     fi
 
@@ -433,14 +406,17 @@ getData() {
             2)
                 len=${#SITES[@]}
                 ((len--))
-                _attempt=0
-                while [[ $_attempt -lt 40 ]]; do
-                    ((_attempt++)) || true
+                while true
+                do
                     index=`shuf -i0-${len} -n1`
                     PROXY_URL=${SITES[$index]}
                     host=`echo ${PROXY_URL} | cut -d/ -f3`
-                    _firstip=$(getDomainARecords "$host" | head -1)
-                    [[ -n "$_firstip" ]] && break
+                    ip=`curl -sL --connect-timeout 15 "http://ip-api.com/json/${host}"`
+                    res=`echo -n ${ip} | grep ${host}`
+                    if [[ "${res}" = "" ]]; then
+                        echo "$ip $host" >> /etc/hosts
+                        break
+                    fi
                 done
                 ;;
             3)
