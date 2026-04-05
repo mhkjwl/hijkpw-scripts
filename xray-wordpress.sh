@@ -8,6 +8,8 @@
 #  5. 移除不支持的 Trojan+XTLS 选项 (Trojan 不支持 Vision 流控)
 #  6. 修复 WordPress 字符集 utf8mb4 错误
 #  7. 升级 XTLS 流控为 xtls-rprx-vision 以兼容新版 Xray
+#  8. 修复单行 JSON 导致 port 提取为 [{"port" 的祖传 Bug
+#  9. 移除 source ~/.bashrc 造成的环境变量污染及结尾的“参数错误”
 
 RED="\033[31m"
 GREEN="\033[32m"
@@ -27,7 +29,6 @@ res=$(command -v bt)
 VLESS="false"; TROJAN="false"; TLS="false"; WS="false"; XTLS="false"; KCP="false"
 VMESS="true"
 
-# 网站伪装列表
 SITES=(
 http://www.zhuizishu.com/
 http://xs.56dyc.com/
@@ -43,9 +44,6 @@ http://www.bequgexs.com/
 http://www.tjwl.com/
 )
 
-# ------------------------------------------------------------
-# 系统检查与基础函数
-# ------------------------------------------------------------
 checkSystem() {
     [[ $(id -u) -ne 0 ]] && { colorEcho $RED "请以root身份执行"; exit 1; }
     res=$(command -v yum)
@@ -55,6 +53,7 @@ checkSystem() {
         PMT="apt"
         CMD_INSTALL="apt install -y"
         CMD_REMOVE="apt remove -y"
+        # 修复 Debian/Ubuntu 自动升级卡死的问题，仅更新源
         CMD_UPGRADE="apt update"
         PHP_SERVICE="php7.4-fpm"
     else
@@ -88,18 +87,18 @@ archAffix() {
     esac
 }
 
-# ------------------------------------------------------------
-# Xray 状态检测
-# ------------------------------------------------------------
 status() {
     [[ ! -f /usr/local/bin/xray ]] && { echo 0; return; }
     [[ ! -f $CONFIG_FILE ]] && { echo 1; return; }
-    port=$(grep port $CONFIG_FILE | head -n1 | cut -d: -f2 | tr -d \",' ')
+    # 修复：使用正则安全地提取纯数字端口，避免 [{"port" 错误
+    local port=$(grep -m1 -oE '"port": ?[0-9]+' $CONFIG_FILE | grep -oE '[0-9]+')
+    [[ -z "$port" ]] && { echo 1; return; }
     ss -nutlp | grep -q ":${port}.*xray" || { echo 2; return; }
     grep -q wsSettings $CONFIG_FILE || { echo 3; return; }
     ss -nutlp | grep -q nginx || { echo 4; return; }
     echo 5
 }
+
 statusText() {
     case $(status) in
         2) echo -e "${GREEN}已安装${PLAIN} ${RED}未运行${PLAIN}" ;;
@@ -110,9 +109,6 @@ statusText() {
     esac
 }
 
-# ------------------------------------------------------------
-# Xray 安装核心函数
-# ------------------------------------------------------------
 getVersion() {
     local CUR_VER=$(/usr/local/bin/xray version 2>/dev/null | head -n1 | awk '{print $2}')
     local TAG_URL="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -149,7 +145,6 @@ EOF
     systemctl enable xray
 }
 
-# 以下为各协议配置函数
 trojanConfig() {
     cat > $CONFIG_FILE <<EOF
 {
@@ -243,9 +238,6 @@ configXray() {
     fi
 }
 
-# ------------------------------------------------------------
-# Nginx 与 证书
-# ------------------------------------------------------------
 installNginx() {
     if [[ "$BT" == "false" ]]; then
         $CMD_INSTALL nginx -y
@@ -273,11 +265,10 @@ getCert() {
     netstat -ntlp | grep -E ':80 |:443 ' && { colorEcho $RED "端口80/443被占用"; exit 1; }
     $CMD_INSTALL socat openssl -y
     
-    # 使用随机邮箱避免被 CA 机构限流
     local RANDOM_EMAIL="admin${RANDOM}@${DOMAIN}"
     curl -sL https://get.acme.sh | sh -s email=${RANDOM_EMAIL}
     
-    source ~/.bashrc
+    # 修复：移除导致环境污染的 source ~/.bashrc 
     ~/.acme.sh/acme.sh --upgrade --auto-upgrade
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
     ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --keylength ec-256 --standalone
@@ -295,7 +286,6 @@ configNginx() {
     local action=""
     [[ -n "$PROXY_URL" ]] && action="proxy_ssl_server_name on; proxy_pass $PROXY_URL; sub_filter \"$REMOTE_HOST\" \"$DOMAIN\"; sub_filter_once off;"
     
-    # Nginx 1.25.1+ HTTP/2 语法兼容性处理
     local HTTP2_FLAG="http2"
     local HTTP2_ON=""
     if command -v nginx &>/dev/null; then
@@ -341,6 +331,7 @@ EOF
         fi
     fi
 }
+
 setFirewall() {
     command -v firewall-cmd &>/dev/null && {
         systemctl is-active firewalld &>/dev/null && {
@@ -356,6 +347,7 @@ setFirewall() {
         [[ "$PORT" != "443" ]] && iptables -I INPUT -p tcp --dport ${PORT} -j ACCEPT
     }
 }
+
 installBBR() {
     [[ "$NEED_BBR" != "y" ]] && return
     lsmod | grep -q bbr && { colorEcho $BLUE "BBR已启用"; return; }
@@ -366,11 +358,7 @@ installBBR() {
     colorEcho $RED "BBR启用失败"; INSTALL_BBR=false
 }
 
-# ------------------------------------------------------------
-# 数据收集
-# ------------------------------------------------------------
 getData() {
-    # 增加获取本机公网IP的逻辑，修复原脚本未定义 $IP 变量的致命错误
     IP=$(curl -s4m8 https://api.ipify.org || curl -s4m8 ip.sb)
     [[ -z "$IP" ]] && IP=$(curl -sL http://ip-api.com/json/ | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
 
@@ -423,9 +411,6 @@ getData() {
 }
 needNginx() { [[ "$WS" == "true" ]] && echo "yes" || echo "no"; }
 
-# ------------------------------------------------------------
-# Xray 安装主流程
-# ------------------------------------------------------------
 installXrayMain() {
     getData
     $CMD_UPGRADE
@@ -450,9 +435,6 @@ installXrayMain() {
     [[ "$INSTALL_BBR" == "true" ]] && { colorEcho $YELLOW "系统将重启以启用BBR"; sleep 3; reboot; }
 }
 
-# ------------------------------------------------------------
-# WordPress 相关函数
-# ------------------------------------------------------------
 installPHP() {
     [[ "$PMT" == "apt" ]] && $PMT update
     $CMD_INSTALL curl wget ca-certificates -y
@@ -464,7 +446,6 @@ installPHP() {
         $CMD_INSTALL php-cli php-fpm php-bcmath php-gd php-mbstring php-mysqlnd php-pdo php-xml php-pecl-zip -y
     else
         $CMD_INSTALL lsb-release gnupg2 curl -y
-        # 修复 Ubuntu/Debian apt-key 废弃问题，使用 gpg 方式挂载密钥
         curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor --yes -o /usr/share/keyrings/php-archive-keyring.gpg
         echo "deb [signed-by=/usr/share/keyrings/php-archive-keyring.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php.list
         $PMT update
@@ -473,6 +454,7 @@ installPHP() {
     fi
     systemctl enable $PHP_SERVICE
 }
+
 installMysql() {
     if [[ "$PMT" == "yum" ]]; then
         yum remove -y MariaDB-server
@@ -491,6 +473,7 @@ EOF
     fi
     systemctl enable mariadb
 }
+
 installWordPress() {
     mkdir -p /var/www
     wget https://cn.wordpress.org/latest-zh_CN.tar.gz || { colorEcho $RED "下载失败"; exit 1; }
@@ -499,6 +482,7 @@ installWordPress() {
     mv wordpress "/var/www/$DOMAIN"
     rm -f latest-zh_CN.tar.gz
 }
+
 configWordPress() {
     systemctl start mariadb
     DBNAME="wordpress"
@@ -514,9 +498,7 @@ EOF
     cd "/var/www/$DOMAIN"
     cp wp-config-sample.php wp-config.php
     sed -i "s/database_name_here/$DBNAME/; s/username_here/$DBUSER/; s/password_here/$DBPASS/" wp-config.php
-    # 修复字符集错误：使用精确替换，避免 utf8 -> utf8mb4 -> utf8mb4mb4
     perl -pi -e "s/utf8/utf8mb4/ if /DB_CHARSET/" wp-config.php
-    # 生成随机密钥
     perl -i -pe '
         BEGIN { @chars = ("a".."z","A".."Z",0..9,"!","@","#","$","%","^","&","*","(",")","-","_","=","+","[","]","{","}","|",";",":",",",".","/","?","<",">","~"); sub salt { join "", map $chars[rand @chars], 1..64 } }
         s/put your unique phrase here/salt()/ge
@@ -542,6 +524,7 @@ EOF
     fi
     systemctl restart $PHP_SERVICE mariadb nginx
 }
+
 showWordPressInfo() {
     local wpconfig="/var/www/${DOMAIN}/wp-config.php"
     [[ ! -f "$wpconfig" ]] && { colorEcho $RED "WordPress未安装"; return; }
@@ -559,6 +542,7 @@ showWordPressInfo() {
     echo -e "  网址: $url"
     echo "==============================="
 }
+
 uninstallWordPress() {
     read -p "确认卸载WordPress? [y/n]: " ans
     [[ "$ans" != "y" && "$ans" != "Y" ]] && exit
@@ -569,9 +553,6 @@ uninstallWordPress() {
     colorEcho $GREEN "WordPress卸载完成"
 }
 
-# ------------------------------------------------------------
-# Xray 管理功能
-# ------------------------------------------------------------
 updateXray() {
     getVersion; case $? in 0) colorEcho $BLUE "已是最新";;2) colorEcho $RED "未安装";;3) exit 1;;*) installXray;;
     esac
@@ -585,6 +566,7 @@ uninstallXray() {
 startXray() { systemctl start xray nginx; }
 stopXray()  { systemctl stop xray nginx; }
 restartXray(){ systemctl restart xray nginx; }
+
 showXrayInfo() {
     grep -q wsSettings $CONFIG_FILE && WS_MODE="WS" || WS_MODE="TCP"
     colorEcho $BLUE "Xray配置信息："
@@ -594,15 +576,16 @@ showXrayInfo() {
     grep -q '"protocol": "trojan"' $CONFIG_FILE && echo "协议: Trojan"
     grep -q '"security": "tls"' $CONFIG_FILE && echo "加密: TLS"
     grep -q '"flow": "xtls-rprx-vision"' $CONFIG_FILE && echo "流控: xtls-rprx-vision"
-    echo "端口: $(grep port $CONFIG_FILE | head -n1 | cut -d: -f2 | tr -d ,' ')"
+    
+    # 修复：安全提取端口，解决参数错误问题
+    local port=$(grep -m1 -oE '"port": ?[0-9]+' $CONFIG_FILE | grep -oE '[0-9]+')
+    echo "端口: $port"
+    
     [[ -n "$DOMAIN" ]] && echo "域名: $DOMAIN"
     echo "==============================="
 }
 showXrayLog() { journalctl -u xray -n 50 --no-pager; }
 
-# ------------------------------------------------------------
-# 主菜单
-# ------------------------------------------------------------
 menu() {
     clear
     echo "#############################################################"
@@ -673,8 +656,5 @@ menu() {
     esac
 }
 
-# ------------------------------------------------------------
-# 启动
-# ------------------------------------------------------------
 checkSystem
 [[ -z "$1" ]] && menu || { case $1 in menu|update|uninstall|start|restart|stop|showInfo|showLog) ${1};; *) echo "参数错误";; esac; }
