@@ -67,7 +67,7 @@ check_crontab_installed_status(){
 	fi
 }
 check_pid(){
-	PID=`ps -ef| grep "./mtproto-proxy "| grep -v "grep" | grep -v "init.d" |grep -v "service" |awk '{print $2}'`
+	PID=`ps -ef | grep "mtproto-proxy" | grep -v "grep" | grep -v "init.d" | grep -v "service" | awk '{print $2}'`
 }
 Download_mtproxy(){
 	[[ -e '/tmp/mtproxy' ]] && rm -rf '/tmp/mtproxy'
@@ -107,25 +107,113 @@ Download_multi(){
 	echo -e "${Info} MTProxy Multi下载成功!"
 }
 Service_mtproxy(){
+	cat > /etc/init.d/mtproxy <<'EOF'
+#!/usr/bin/env bash
+### BEGIN INIT INFO
+# Provides:          mtproxy
+# Required-Start:    $network $local_fs
+# Required-Stop:     $network $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: MTProxy service
+### END INIT INFO
+
+NAME="mtproxy"
+WORKDIR="/usr/local/mtproxy"
+BIN="${WORKDIR}/mtproto-proxy"
+CONF="${WORKDIR}/mtproxy.conf"
+SECRET_FILE="${WORKDIR}/proxy-secret"
+MULTI_FILE="${WORKDIR}/proxy-multi.conf"
+LOG_FILE="${WORKDIR}/mtproxy.log"
+PID_FILE="/var/run/mtproxy.pid"
+RUN_USER="nobody"
+LOCAL_STATS_PORT="8888"
+WORKERS="1"
+
+read_cfg() {
+  [[ -f "${CONF}" ]] || return 1
+  PORT=$(awk -F 'PORT = ' '/PORT = /{print $2}' "${CONF}" | tr -d '[:space:]')
+  PASSWORD=$(awk -F 'PASSWORD = ' '/PASSWORD = /{print $2}' "${CONF}" | tr -d '[:space:]')
+  TAG=$(awk -F 'TAG = ' '/TAG = /{print $2}' "${CONF}" | tr -d '[:space:]')
+  NAT=$(awk -F 'NAT = ' '/NAT = /{print $2}' "${CONF}" | tr -d '[:space:]')
+  [[ -n "${PORT}" && -n "${PASSWORD}" ]]
+}
+
+build_cmd() {
+  CMD=( "${BIN}" -u "${RUN_USER}" -p "${LOCAL_STATS_PORT}" -H "${PORT}" -S "${PASSWORD}" --aes-pwd "${SECRET_FILE}" "${MULTI_FILE}" -M "${WORKERS}" )
+  [[ -n "${TAG}" ]] && CMD+=( -P "${TAG}" )
+  [[ -n "${NAT}" ]] && CMD+=( --nat-info "${NAT}" )
+}
+
+start() {
+  if [[ ! -x "${BIN}" ]]; then
+    echo "[错误] mtproto-proxy 不存在或不可执行: ${BIN}"
+    return 1
+  fi
+  if [[ ! -s "${SECRET_FILE}" || ! -s "${MULTI_FILE}" ]]; then
+    echo "[错误] 缺少必要文件: ${SECRET_FILE} 或 ${MULTI_FILE}"
+    return 1
+  fi
+  read_cfg || { echo "[错误] 配置文件无效: ${CONF}"; return 1; }
+  if [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" >/dev/null 2>&1; then
+    echo "[信息] MTProxy 已在运行"
+    return 0
+  fi
+  build_cmd
+  cd "${WORKDIR}" || return 1
+  nohup "${CMD[@]}" >> "${LOG_FILE}" 2>&1 &
+  echo $! > "${PID_FILE}"
+  sleep 1
+  if kill -0 "$(cat "${PID_FILE}")" >/dev/null 2>&1; then
+    echo "[信息] MTProxy 启动成功"
+    return 0
+  fi
+  echo "[错误] MTProxy 启动失败"
+  rm -f "${PID_FILE}"
+  return 1
+}
+
+stop() {
+  if [[ ! -f "${PID_FILE}" ]]; then
+    pkill -f "${BIN}" >/dev/null 2>&1
+    echo "[信息] MTProxy 已停止"
+    return 0
+  fi
+  PID=$(cat "${PID_FILE}")
+  if kill -0 "${PID}" >/dev/null 2>&1; then
+    kill "${PID}" >/dev/null 2>&1
+    sleep 1
+    kill -9 "${PID}" >/dev/null 2>&1
+  fi
+  rm -f "${PID_FILE}"
+  echo "[信息] MTProxy 已停止"
+}
+
+status() {
+  if [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" >/dev/null 2>&1; then
+    echo "[信息] MTProxy 运行中 (PID: $(cat "${PID_FILE}"))"
+    return 0
+  fi
+  echo "[信息] MTProxy 未运行"
+  return 1
+}
+
+case "$1" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  status) status ;;
+  *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
+EOF
+	chmod +x "/etc/init.d/mtproxy"
 	if [[ ${release} = "centos" ]]; then
-		if ! wget --no-check-certificate "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/service/mtproxy_centos" -O /etc/init.d/mtproxy; then
-			echo -e "${Error} MTProxy服务 管理脚本下载失败 !"
-			rm -rf "${file}"
-			exit 1
-		fi
-		chmod +x "/etc/init.d/mtproxy"
 		chkconfig --add mtproxy
 		chkconfig mtproxy on
 	else
-		if ! wget --no-check-certificate "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/service/mtproxy_debian" -O /etc/init.d/mtproxy; then
-			echo -e "${Error} MTProxy服务 管理脚本下载失败 !"
-			rm -rf "${file}"
-			exit 1
-		fi
-		chmod +x "/etc/init.d/mtproxy"
 		update-rc.d -f mtproxy defaults
 	fi
-	echo -e "${Info} MTProxy服务 管理脚本下载完成 !"
+	echo -e "${Info} MTProxy服务 管理脚本写入完成 !"
 }
 Installation_dependency(){
 	if [[ ${release} == "centos" ]]; then
