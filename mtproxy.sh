@@ -69,6 +69,14 @@ check_crontab_installed_status(){
 check_pid(){
 	PID=`ps -ef | grep "mtproto-proxy" | grep -v "grep" | grep -v "init.d" | grep -v "service" | awk '{print $2}'`
 }
+Patch_mtproxy_source(){
+	# 1) 降低 CPU 指令集要求，避免部分老旧/虚拟化 CPU 在启动时崩溃
+	sed -i 's/-mpclmul -march=core2 -mfpmath=sse -mssse3/-march=x86-64 -mtune=generic/g' Makefile
+	# 2) 修复 net-msg-buffers.c 中 free 后继续使用指针的问题
+	if [[ -f "net/net-msg-buffers.c" ]]; then
+		sed -i '/free (C);/{n;s/free_mp_queue (C->free_block_queue);/if (C->free_block_queue) { free_mp_queue (C->free_block_queue); }/;n;s/C->free_block_queue = NULL;//;}' net/net-msg-buffers.c
+	fi
+}
 Download_mtproxy(){
 	[[ -e '/tmp/mtproxy' ]] && rm -rf '/tmp/mtproxy'
 	mkdir '/tmp/mtproxy'
@@ -77,6 +85,7 @@ Download_mtproxy(){
 	git clone --depth 1 https://github.com/TelegramMessenger/MTProxy.git
 	[[ ! -e "MTProxy/" ]] && echo -e "${Error} MTProxy 下载失败!" && cd '/tmp' && rm -rf '/tmp/mtproxy' && exit 1
 	cd MTProxy
+	Patch_mtproxy_source
 	make clean >/dev/null 2>&1
 	make
 	[[ ! -e "objs/bin/mtproto-proxy" ]] && echo -e "${Error} MTProxy 编译失败!" && echo -e "另外，如果在上面几行看到 ${Green_font_prefix}xxxxx option \"-std=gnu11\"${Font_color_suffix} 字样，说明是系统版本过低，请尝试更换系统重试！" && make clean && cd '/tmp' && rm -rf '/tmp/mtproxy' && exit 1
